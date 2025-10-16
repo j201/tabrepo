@@ -3,7 +3,7 @@ from __future__ import annotations
 from setuptools import find_packages, setup
 
 requirements = [
-    "autogluon>=1.4,<1.5",  # TODO: Remove after moving `benchmark` code elsewhere
+    "autogluon>=1.4.1b20250910,<1.5",  # TODO: Remove after moving `benchmark` code elsewhere
     "openml>=0.14.1",  # consider making optional
     "pyyaml",
     "pytest",
@@ -38,11 +38,7 @@ extras_require = {
         "pytabkit>=1.5.0,<2.0",
     ],
     "tabdpt": [
-        # TODO: pypi package is not available yet
-        # FIXME: newest version (1.1) has (unnecessary) strict version requirements
-        #  that are not compatible with autogluon, so we stick to the old hash
-        "tabdpt @ git+https://github.com/layer6ai-labs/TabDPT.git@9699d9592b61c5f70fc88f5531cdb87b40cbedf5",
-        # used hash: 9699d9592b61c5f70fc88f5531cdb87b40cbedf5
+        "tabdpt>=1.1.6"
     ],
     "tabm": [
         "torch",
@@ -80,8 +76,6 @@ setup(
             "metrics/_roc_auc_cpp/compile.sh",
             "metrics/_roc_auc_cpp/cpp_auc.cpp",
             "nips2025_utils/metadata/task_metadata_tabarena51.csv",
-            "nips2025_utils/metadata/task_metadata_tabarena60.csv",
-            "nips2025_utils/metadata/task_metadata_tabarena61.csv",
         ],
     },
     url="https://github.com/autogluon/tabrepo",
