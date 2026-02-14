@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from tabrepo import EvaluationRepository
+from tabrepo.portfolio.greedy_portfolio_generator import zeroshot_name
+from tabrepo.nips2025_utils.file_path import figure_path
 from tabrepo.utils.normalized_scorer import NormalizedScorer
 from tabrepo.utils.rank_utils import RankScorer
-from tabrepo import EvaluationRepository
-from tabrepo.nips2025_utils.file_path import figure_path
-from scripts.baseline_comparison.baselines import zeroshot_name
 
 default_ensemble_size = 40
 
@@ -63,7 +64,14 @@ def get_method_rename_map() -> dict:
     }
 
 
-def get_framework_type_method_names(framework_types, max_runtimes: list[tuple[int, str]] = None, include_default: bool = True, include_best: bool = True, include_holdout: bool = True):
+def get_framework_type_method_names(
+    framework_types,
+    max_runtimes: list[tuple[int, str]] = None,
+    include_default: bool = True,
+    include_best: bool = True,
+    include_holdout: bool = True,
+    f_map_type_name: dict | None = None,
+):
     """
 
     Parameters
@@ -86,7 +94,9 @@ def get_framework_type_method_names(framework_types, max_runtimes: list[tuple[in
     f_map = dict()
     f_map_type = dict()
     f_map_inverse = dict()
-    f_map_type_name = get_method_rename_map()
+
+    if f_map_type_name is None:
+        f_map_type_name = get_method_rename_map()
     for framework_type in framework_types:
         f_map_cur = dict()
         for max_runtime, suffix in max_runtimes:
@@ -112,6 +122,32 @@ def get_framework_type_method_names(framework_types, max_runtimes: list[tuple[in
         f_map_type.update(f_map_type_cur)
         f_map_inverse.update(f_map_inverse_cur)
     return f_map, f_map_type, f_map_inverse, f_map_type_name
+
+
+def get_f_map_suffix() -> dict:
+    f_map_suffix = dict(
+        default=" (default)",
+        tuned=" (tuned)",
+        tuned_ensembled=" (tuned + ensemble)",
+        best=" (best)",
+        holdout=" (holdout)",
+        holdout_tuned=" (tuned, holdout)",
+        holdout_tuned_ensembled=" (tuned + ensemble, holdout)",
+    )
+    return f_map_suffix
+
+
+def get_f_map_suffix_plots() -> dict:
+    f_map_suffix_plots = dict(
+        default="-D",
+        tuned="-T",
+        tuned_ensembled="-TE",
+        best="-B",
+        holdout="-D (H)",
+        holdout_tuned="-T (H)",
+        holdout_tuned_ensembled="-TE (H)",
+    )
+    return f_map_suffix_plots
 
 
 def framework_name(framework_type, max_runtime=None, ensemble_size=default_ensemble_size, tuned: bool=True, all: bool = False, prefix: str = None, suffix: str = None) -> str:

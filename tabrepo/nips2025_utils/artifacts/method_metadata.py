@@ -3,20 +3,22 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-import requests
 from typing import Literal, TYPE_CHECKING
 from typing_extensions import Self
 
 from autogluon.common.utils.s3_utils import s3_path_to_bucket_prefix
+from autogluon.common.savers import save_pd
 import pandas as pd
 import yaml
 
 from tabrepo.loaders import Paths
 from tabrepo.repository.evaluation_repository import EvaluationRepository
 from tabrepo.nips2025_utils.generate_repo import generate_repo_from_results_lst
+from tabrepo.nips2025_utils.load_artifacts import results_to_holdout
 from tabrepo.benchmark.result import BaselineResult
 from tabrepo.nips2025_utils.method_processor import get_info_from_result, load_raw
 from tabrepo.utils.s3_utils import s3_get_object
+from tabrepo.paper.paper_runner_tabarena import PaperRunTabArena
 
 if TYPE_CHECKING:
     from tabrepo.nips2025_utils.artifacts.method_downloader import MethodDownloaderS3
@@ -33,6 +35,7 @@ class MethodMetadata:
         method_type: Literal["config", "baseline", "portfolio"] = "config",
         name_suffix: str | None = None,
         ag_key: str | None = None,
+        model_key: str | None = None,
         config_default: str | None = None,
         can_hpo: bool | None = None,
         compute: Literal["cpu", "gpu"] = "cpu",
@@ -52,6 +55,9 @@ class MethodMetadata:
         self.date = date
         self.method_type = method_type
         self.ag_key = ag_key
+        if model_key is None:
+            model_key = ag_key
+        self.model_key = model_key
         self.name_suffix = name_suffix
         self.config_default = config_default
         self.compute = compute
@@ -273,6 +279,18 @@ class MethodMetadata:
     def path_results_holdout(self) -> Path:
         return self.path_results / "holdout"
 
+    @property
+    def path_raw_exists(self) -> bool:
+        return self.path_raw.is_dir()
+
+    @property
+    def path_processed_exists(self) -> bool:
+        return self.path_processed.is_dir()
+
+    @property
+    def path_results_exists(self) -> bool:
+        return self.path_results.is_dir()
+
     def path_results_hpo(self, holdout: bool = False) -> Path:
         path_prefix = self.path_results_holdout if holdout else self.path_results
         return path_prefix / "hpo_results.parquet"
@@ -362,7 +380,20 @@ class MethodMetadata:
         path_configs_hyperparameters = path_processed / "configs_hyperparameters.json"
         return path_configs_hyperparameters
 
-    def load_configs_hyperparameters(self, holdout: bool = False) -> dict[str, dict]:
+    def load_configs_hyperparameters(self, holdout: bool = False, download: str | bool = "auto") -> dict[str, dict]:
+        if download == "auto":
+            try:
+                return self.load_configs_hyperparameters(holdout=holdout, download=False)
+            except FileNotFoundError as err:
+                print(
+                    f"Cache miss detected for configs_hyperparameters.json "
+                    f"(method={self.method}), attempting download..."
+                )
+                out = self.load_configs_hyperparameters(holdout=holdout, download=True)
+                print(f"\tDownload successful")
+                return out
+        elif isinstance(download, bool) and download:
+            self.download_configs_hyperparameters(holdout=holdout)
         with open(self.path_configs_hyperparameters(holdout=holdout), "r") as f:
             out = json.load(f)
         return out
@@ -370,18 +401,6 @@ class MethodMetadata:
     def download_configs_hyperparameters(self, holdout: bool = False):
         method_downloader = self.method_downloader()
         method_downloader.download_configs_hyperparameters(holdout=holdout)
-
-    def _download_file(self, url: str, local_path: str | Path):
-        local_path = Path(local_path)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-
-        response = requests.get(url, stream=True)
-        response.raise_for_status()  # Check for HTTP request errors
-
-        with open(local_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:  # Filter out keep-alive chunks
-                    f.write(chunk)
 
     def load_raw(
         self,
@@ -411,6 +430,7 @@ class MethodMetadata:
         path_processed: str | Path = None,
         prediction_format: Literal["memmap", "memopt", "mem"] = "memmap",
         as_holdout: bool = False,
+        verbose: bool = False,
     ) -> EvaluationRepository:
         if path_processed is None:
             if as_holdout:
@@ -420,6 +440,7 @@ class MethodMetadata:
         repo = EvaluationRepository.from_dir(
             path=path_processed,
             prediction_format=prediction_format,
+            verbose=verbose,
         )
         return repo
 
@@ -442,6 +463,73 @@ class MethodMetadata:
         if cache:
             repo.to_dir(self.path_processed)
         return repo
+
+    def generate_repo_holdout(
+        self,
+        results_lst: list[BaselineResult] = None,
+        task_metadata: pd.DataFrame = None,
+        cache: bool = False,
+        engine: str = "ray",
+    ) -> EvaluationRepository:
+        if results_lst is None:
+            results_lst = self.load_raw(engine=engine)
+        results_holdout_lst = results_to_holdout(result_lst=results_lst)
+        repo: EvaluationRepository = generate_repo_from_results_lst(
+            results_lst=results_holdout_lst,
+            task_metadata=task_metadata,
+            name_suffix=self.name_suffix,
+        )
+
+        if cache:
+            repo.to_dir(self.path_processed_holdout)
+        return repo
+
+    def generate_results(
+        self,
+        repo: EvaluationRepository | None = None,
+        as_holdout: bool = False,
+        backend: Literal["ray", "native"] = "ray",
+        cache: bool = False,
+    ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
+        save_file = str(self.path_results_hpo(holdout=as_holdout))
+        save_file_model = str(self.path_results_model(holdout=as_holdout))
+        if repo is None:
+            repo = self.load_processed(as_holdout=as_holdout)
+
+        if self.method_type == "config":
+            model_types = repo.config_types()
+            assert len(model_types) == 1
+            model_type = model_types[0]
+        else:
+            model_type = None
+
+        simulator = PaperRunTabArena(repo=repo, backend=backend)
+
+        if self.method_type == "config":
+            hpo_results = simulator.run_minimal_single(model_type=model_type, tune=self.can_hpo)
+            hpo_results["ta_name"] = self.method
+            hpo_results["ta_suite"] = self.artifact_name
+            hpo_results = hpo_results.rename(columns={"framework": "method"})  # FIXME: Don't do this, make it method by default
+            if cache:
+                save_pd.save(path=save_file, df=hpo_results)
+            config_results = simulator.run_config_family(config_type=model_type)
+            baseline_results = None
+        else:
+            hpo_results = None
+            config_results = None
+            baseline_results = simulator.run_baselines()
+
+        results_lst = [config_results, baseline_results]
+        results_lst = [r for r in results_lst if r is not None]
+        model_results = pd.concat(results_lst, ignore_index=True)
+
+        model_results["ta_name"] = self.method
+        model_results["ta_suite"] = self.artifact_name
+        model_results = model_results.rename(columns={"framework": "method"})  # FIXME: Don't do this, make it method by default
+        if cache:
+            save_pd.save(path=save_file_model, df=model_results)
+
+        return hpo_results, model_results
 
     @property
     def path_metadata(self) -> Path:

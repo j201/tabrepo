@@ -7,7 +7,6 @@ from pathlib import Path
 import pandas as pd
 
 from tabrepo.nips2025_utils.fetch_metadata import load_task_metadata
-from scripts.baseline_comparison.evaluate_utils import plot_family_proportion
 from .paper_runner import PaperRun
 from tabrepo.tabarena.tabarena import TabArena
 from .paper_utils import get_framework_type_method_names
@@ -93,19 +92,95 @@ class PaperRunTabArena(PaperRun):
         print(df_results_all)
         return df_results_all
 
+    # FIXME: Temp
+    def run_portfolio_search(
+        self,
+        result_baselines: pd.DataFrame,
+        model_types: list[str] = None,
+        selected_types: list[str] = None,
+        n_portfolio: int = 25,
+        n_ensemble: int = 40,
+        time_limit: float | None = 14400,
+        eval_fold_as_dataset: bool = False,
+    ) -> pd.DataFrame:
+        calibration_framework = "RF (default)"
+        elo_bootstrap_rounds = 100
+        if model_types is None:
+            model_types = self.repo.config_types()
+        n_eval_folds = 1  # FIXME
+
+        n_types = len(model_types)
+
+        if selected_types is None:
+            selected_types = []
+        for i in range(n_types):
+            model_types_avail = [model_type for model_type in model_types if model_type not in selected_types]
+            results_dict_cur_round = {}
+            for model_type in model_types_avail:
+                candidate_selected_types = selected_types + [model_type]
+                print(candidate_selected_types)
+                candidate_configs = self.repo.configs(config_types=candidate_selected_types)
+                cur_result = self.run_zs(
+                    configs=candidate_configs,
+                    n_portfolios=n_portfolio,
+                    n_ensemble=n_ensemble,
+                    n_ensemble_in_name=False,
+                    time_limit=time_limit,
+                    # n_eval_folds=n_eval_folds,
+                )
+                cur_result["framework"] = model_type
+                cur_result["method"] = cur_result["framework"]
+                cur_result = cur_result.drop(columns=["framework"])
+                results_dict_cur_round[model_type] = cur_result
+                # print(cur_result)
+
+            combined_data_cur_round = pd.concat([v for v in results_dict_cur_round.values()], ignore_index=True)
+            combined_data = pd.concat([result_baselines, combined_data_cur_round], ignore_index=True)
+
+            if eval_fold_as_dataset:
+                # FIXME: Shouldn't hardcode 9, need to make elo calculation work properly with weighting
+                combined_data = combined_data[combined_data["fold"] < 9]
+                combined_data["dataset"] = combined_data["dataset"] + "_" + combined_data["fold"].astype(str)
+                combined_data["fold"] = 0
+
+            arena = TabArena(
+                task_col="dataset",
+                groupby_columns=["problem_type", "metric"],
+                seed_column="fold",
+            )
+            leaderboard = arena.leaderboard(
+                data=combined_data,
+                include_elo=True,
+                elo_kwargs=dict(
+                    calibration_framework=calibration_framework,
+                    calibration_elo=1000,
+                    BOOTSTRAP_ROUNDS=elo_bootstrap_rounds,
+                )
+            ).reset_index(drop=False)
+            leaderboard_cur_round = leaderboard[leaderboard["method"].isin(results_dict_cur_round.keys())]
+            print(leaderboard[["method", "elo"]])
+            best_method_info_cur = leaderboard_cur_round.sort_values(by="elo", ascending=False).iloc[0]
+            best_method_cur = best_method_info_cur["method"]
+            best_method_cur_elo = best_method_info_cur["elo"]
+            print(f"Best: {best_method_cur}\tElo: {best_method_cur_elo:.2f}")
+            selected_types.append(best_method_cur)
+            print(f"Selected Types: {selected_types}")
+
     def run_only_portfolio_200(self) -> pd.DataFrame:
         n_portfolio = 200
         return self.run_zs(n_portfolios=n_portfolio, n_ensemble=None, n_ensemble_in_name=False)
 
     # FIXME: This is a hack
-    def _config_default(self, config_type: str, return_none_if_missing=False) -> str | None:
+    def _config_default(self, config_type: str, use_first_if_missing=False, return_none_if_missing=False) -> str | None:
         configs = self.repo.configs(config_types=[config_type])
-        configs_default = [c for c in configs if "_c1_" in c]
+        configs_default = [c for c in configs if "_c1_" in c or c.endswith("_c1")]
         if len(configs_default) == 1:
             return configs_default[0]
         elif len(configs_default) == 0:
-            configs_default = [c for c in configs if "_r1_" in c]
+            configs_default = [c for c in configs if "_r1_" in c or c.endswith("_r1")]
             if len(configs_default) == 0:
+                if (len(configs) > 0) and use_first_if_missing:
+                    return configs[0]
                 if return_none_if_missing:
                     return None
                 raise ValueError(
@@ -140,7 +215,7 @@ class PaperRunTabArena(PaperRun):
         return df_results_config
 
     def run_config_default(self, model_type: str) -> pd.DataFrame:
-        config_default = self._config_default(config_type=model_type)
+        config_default = self._config_default(config_type=model_type, use_first_if_missing=True)
         df_results_config = self.run_config(config=config_default)
         configs_types = self.repo.configs_type()
         df_results_config["method_type"] = "config"
@@ -189,7 +264,7 @@ class PaperRunTabArena(PaperRun):
         -------
 
         """
-        config_default = self._config_default(config_type=model_type, return_none_if_missing=True)
+        config_default = self._config_default(config_type=model_type, use_first_if_missing=True)
         if config_default is not None:
             df_results_config_default = self.run_config_default(model_type=model_type)
         else:
